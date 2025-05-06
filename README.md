@@ -1,1 +1,4 @@
 python train.py --train_dirs "C:\shared\data0205\Archives020525\train_images" --train_anns  "C:\shared\data0205\Archives020525\train.json" --val_dirs   "C:\shared\data0205\Archives020525\test_images" --val_anns   "C:\shared\data0205\Archives020525\test.json"
+
+python train.py --train_dirs "C:\data0205\Archives020525\train_images" --train_anns  "C:\data0205\Archives020525\train.json" --val_dirs   "C:\data0205\Archives020525\test_images" --val_anns   "C:\data0205\Archives020525\test.json"
+
