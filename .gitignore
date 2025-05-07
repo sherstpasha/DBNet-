@@ -1,6 +1,7 @@
 # folders to ignore
 dist/
-
+runs/
+checkpoints/
 
 .vscode/
 .pytest_cache/
