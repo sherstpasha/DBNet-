@@ -15,31 +15,27 @@ def sliding_window_inference(
     db_k: float = 50.0,
 ):
     """
-    Tiled inference over `image` with overlap, handles images smaller than window_size.
-    Returns float32 probability map H×W.
+    Tiled inference over `image` с overlap, возвращает четыре карты float32 H×W:
+      - prob_full:  финальная probability map (sigmoid(k*(score-thresh)))
+      - score_full: среднее по плиткам значение score-логитов
+      - thresh_full: среднее по плиткам значение thresh-логитов
+      - bnd_full:   среднее по плиткам значение boundary-логитов
     """
     w, h = image.size
-    # Actual window dims (can't exceed image dims)
     win_w = min(window_size, w)
     win_h = min(window_size, h)
 
-    # Compute tile start positions
-    if w > win_w:
-        xs = list(range(0, w - win_w + 1, stride))
-        if xs[-1] != w - win_w:
-            xs.append(w - win_w)
-    else:
-        xs = [0]
+    # позиции тайлов
+    xs = list(range(0, w - win_w + 1, stride)) if w > win_w else [0]
+    if xs[-1] != w - win_w: xs.append(w - win_w)
+    ys = list(range(0, h - win_h + 1, stride)) if h > win_h else [0]
+    if ys[-1] != h - win_h: ys.append(h - win_h)
 
-    if h > win_h:
-        ys = list(range(0, h - win_h + 1, stride))
-        if ys[-1] != h - win_h:
-            ys.append(h - win_h)
-    else:
-        ys = [0]
-
-    pred_full = np.zeros((h, w), dtype=np.float32)
-    count_map = np.zeros((h, w), dtype=np.float32)
+    pred_full   = np.zeros((h, w), dtype=np.float32)
+    score_full  = np.zeros((h, w), dtype=np.float32)
+    thresh_full = np.zeros((h, w), dtype=np.float32)
+    bnd_full    = np.zeros((h, w), dtype=np.float32)
+    count_map   = np.zeros((h, w), dtype=np.float32)
 
     normalize = T.Compose([
         T.ToTensor(),
@@ -50,21 +46,36 @@ def sliding_window_inference(
     with torch.no_grad():
         for top in ys:
             for left in xs:
-                # crop window
                 crop = image.crop((left, top, left + win_w, top + win_h))
-                inp = normalize(crop).unsqueeze(0).to(device)
+                inp  = normalize(crop).unsqueeze(0).to(device)
+
                 out = model(inp)["out"]
-                score  = out[:, 0:1]    # [B,1,Wh,Ww]
-                thresh = out[:, 1:2]
-                prob   = torch.sigmoid(db_k * (score - thresh))
-                prob_np = prob[0,0].cpu().numpy()
+                # out: [B,3,Wh,Ww] → три логита
+                score = out[:,0:1]   # score-логиты
+                thresh= out[:,1:2]   # thresh-логиты
+                bnd   = out[:,2:3]   # boundary-логиты
 
-                pred_full[top:top+win_h, left:left+win_w] += prob_np
-                count_map[top:top+win_h, left:left+win_w] += 1
+                prob  = torch.sigmoid(db_k * (score - thresh))
 
-    # avoid division by zero
-    pred_full /= np.maximum(count_map, 1.0)
-    return pred_full
+                sf = score[0,0].cpu().numpy()
+                tf = thresh[0,0].cpu().numpy()
+                bf = bnd[0,0].cpu().numpy()
+                pf = prob[0,0].cpu().numpy()
+
+                score_full [top:top+win_h, left:left+win_w] += sf
+                thresh_full[top:top+win_h, left:left+win_w] += tf
+                bnd_full   [top:top+win_h, left:left+win_w] += bf
+                pred_full  [top:top+win_h, left:left+win_w] += pf
+                count_map  [top:top+win_h, left:left+win_w] += 1
+
+    # Нормировка по числу влившихся тайлов
+    count_map = np.maximum(count_map, 1.0)
+    return (
+        pred_full   / count_map,
+        score_full  / count_map,
+        thresh_full / count_map,
+        bnd_full    / count_map,
+    )
 
 
 def replace_bn_gn(module: nn.Module, num_groups: int = 32) -> nn.Module:
