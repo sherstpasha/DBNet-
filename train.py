@@ -21,6 +21,10 @@ def train(args):
     )
     print(f"Using device: {device}")
 
+    # директория для чекпоинтов
+    os.makedirs(args.ckpt_dir, exist_ok=True)
+    best_val_loss = float("inf")
+
     # 1) TRAIN DATASET (с кропами для обучения)
     train_ds = COCOTextDataset(
         images_dirs=args.train_dirs,
@@ -220,11 +224,22 @@ def train(args):
 
             # метрики валидации
             nvb = len(val_loader)
-            writer.add_scalar("Loss/val_total_epoch", sum_vloss / nvb, ep)
+            avg_val_loss = sum_vloss / nvb
+            writer.add_scalar("Loss/val_total_epoch", avg_val_loss, ep)
             writer.add_scalar("Loss/val_score_epoch", sum_vLs / nvb, ep)
             writer.add_scalar("Loss/val_binary_epoch", sum_vLb / nvb, ep)
             writer.add_scalar("Loss/val_thresh_epoch", sum_vLt / nvb, ep)
             writer.add_scalar("Loss/val_boundary_epoch", sum_vLbnd / nvb, ep)
+
+            # если улучшилось — сохраняем чекпоинт
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                torch.save(
+                    model.state_dict(), os.path.join(args.ckpt_dir, "best_model.pth")
+                )
+                print(
+                    f"[Epoch {ep}] New best val loss: {avg_val_loss:.4f}, model saved."
+                )
 
             # sliding-window inference на весь кадр + визуализация
             prob_full, sc_full, th_full, bd_full = sliding_window_inference(
@@ -269,6 +284,7 @@ if __name__ == "__main__":
     parser.add_argument("--gamma", type=float, default=1.0)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--log_dir", type=str, default="runs")
+    parser.add_argument("--ckpt_dir", type=str, default="checkpoints")
     args = parser.parse_args()
 
     train(args)
