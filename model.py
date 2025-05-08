@@ -40,11 +40,11 @@ def build_model(db_k=50.0):
     # Adaptive Scale Fusion
     asf = AdaptiveScaleFusion(in_channels=256, num_scales=4)
 
-    # Segmentation head
+    # Segmentation head: теперь 4 каналов (score, thresh, boundary, k_map)
     head = nn.Sequential(
         nn.Conv2d(256, 128, kernel_size=3, padding=1),
         nn.ReLU(inplace=True),
-        nn.Conv2d(128, 3, kernel_size=1),
+        nn.Conv2d(128, 4, kernel_size=1),  # 4 выходных каналов
     )
 
     class DBNetPlusPlus(nn.Module):
@@ -54,11 +54,11 @@ def build_model(db_k=50.0):
             self.fpn = fpn
             self.asf = asf
             self.head = head
+            # db_k теперь не используется напрямую, но можно хранить для совместимости
             self.db_k = db_k
 
         def forward(self, x):
             feats = self.extractor(x)
-            # multi-scale features
             p2, p3, p4, p5 = feats["p2"], feats["p3"], feats["p4"], feats["p5"]
 
             # FPN outputs as dict with keys '0','1','2','3'
@@ -82,8 +82,25 @@ def build_model(db_k=50.0):
             out = self.head(fused)
             out = F.interpolate(
                 out, size=x.shape[2:], mode="bilinear", align_corners=False
-            )
-            return {"out": out}
+            )  # [B,4,H,W]
+
+            # Разбор каналов
+            pl, tl, bl, kl_raw = out[:, 0:1], out[:, 1:2], out[:, 2:3], out[:, 3:4]
+            # Логиты -> вероятности
+            pp = torch.sigmoid(pl)
+            tp = torch.sigmoid(tl)
+            # k_map: применяем softplus, чтобы гарантировать >0
+            kl = F.softplus(kl_raw)
+            # Binary map с адаптивным k
+            binary_map = torch.sigmoid(kl * (pp - tp))
+
+            return {
+                "score_logits": pl,
+                "thresh_logits": tl,
+                "boundary_logits": bl,
+                "k_map": kl,
+                "binary_map": binary_map,
+            }
 
     model = DBNetPlusPlus(extractor, fpn, asf, head, db_k)
     # Replace BatchNorm with GroupNorm for small batch stability

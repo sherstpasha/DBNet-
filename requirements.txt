@@ -7,3 +7,5 @@ opencv-python
 Pillow
 shapely
 tensorboard
+kornia
+albumentations
