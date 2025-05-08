@@ -17,7 +17,7 @@ class COCOTextDataset(Dataset):
         self,
         images_dirs,
         ann_files,
-        base_size=4096,
+        base_size=2048,
         crop_size=512,  # if None — выключаем все spatial-ауги и кроп
         shrink_ratio=0.3,
         p_flip=0.1,
