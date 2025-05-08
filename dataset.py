@@ -18,13 +18,12 @@ class COCOTextDataset(Dataset):
         images_dirs,
         ann_files,
         base_size=4096,
-        crop_size=512,
+        crop_size=512,  # if None — выключаем все spatial-ауги и кроп
         shrink_ratio=0.3,
         p_flip=0.1,
         p_rotate=0.1,
         p_color=0.1,
         max_angle=7,
-        empty_thresh=0.01,
     ):
         # Normalize paths
         if isinstance(images_dirs, (str, Path)):
@@ -34,29 +33,35 @@ class COCOTextDataset(Dataset):
             ann_files = [ann_files]
         self.ann_files = ann_files
 
-        # Parameters
+        # Params
         self.base_size = base_size
         self.crop_size = crop_size
         self.shrink_ratio = shrink_ratio
-        self.empty_thresh = empty_thresh
 
-        # Transforms (all on CPU)
+        # Transforms all на CPU
         self.normalize = T.Compose(
             [
                 T.ToTensor(),
                 T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ]
         )
-        self.augment = torch.nn.Sequential(
-            K.RandomHorizontalFlip(p=p_flip),
-            K.RandomRotation(degrees=max_angle, p=p_rotate),
-            K.RandomCrop(size=(crop_size, crop_size), p=1.0),
-        )
-        self.color_augment = K.ColorJitter(
-            brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=p_color
-        )
 
-        # Load annotations
+        # Если указан crop_size, собираем pipeline из Kornia
+        if crop_size is not None:
+            self.augment = torch.nn.Sequential(
+                K.RandomHorizontalFlip(p=p_flip),
+                K.RandomRotation(degrees=max_angle, p=p_rotate),
+                K.RandomCrop(size=(crop_size, crop_size), p=1.0),
+            )
+            self.color_augment = K.ColorJitter(
+                brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=p_color
+            )
+        else:
+            # Для валидации — никаких spatial- и color-аугов
+            self.augment = None
+            self.color_augment = None
+
+        # Загрузим аннотации
         self.images = {}
         self.anns = {}
         self.img_map = {}
@@ -75,29 +80,27 @@ class COCOTextDataset(Dataset):
         return len(self.ids)
 
     def _resize_if_needed(self, image: Image.Image):
-        orig_w, orig_h = image.size
-        scale = self.base_size / max(orig_w, orig_h)
+        w, h = image.size
+        scale = self.base_size / max(w, h)
         if scale != 1.0:
-            new_w, new_h = int(orig_w * scale), int(orig_h * scale)
-            image = image.resize((new_w, new_h), Image.BILINEAR)
-            return image, scale, new_w, new_h
-        return image, scale, orig_w, orig_h
+            nw, nh = int(w * scale), int(h * scale)
+            image = image.resize((nw, nh), Image.BILINEAR)
+            return image, scale, nw, nh
+        return image, scale, w, h
 
     def _build_masks(self, img_id, scale, H, W):
-        # Build shrunk and dilated binary masks on CPU
         shr = np.zeros((H, W), dtype=np.uint8)
         dil = np.zeros((H, W), dtype=np.uint8)
         for ann in self.anns.get(img_id, []):
-            coords = (
+            poly = (
                 np.array(ann["segmentation"][0], dtype=np.float32).reshape(-1, 2)
                 * scale
             )
-            center = coords.mean(axis=0)
-            shr_poly = center + (coords - center) * (1 - self.shrink_ratio)
-            dil_poly = center + (coords - center) * (1 + self.shrink_ratio)
+            ctr = poly.mean(axis=0)
+            shr_poly = ctr + (poly - ctr) * (1 - self.shrink_ratio)
+            dil_poly = ctr + (poly - ctr) * (1 + self.shrink_ratio)
             cv2.fillPoly(shr, [shr_poly.astype(np.int32)], 1)
             cv2.fillPoly(dil, [dil_poly.astype(np.int32)], 1)
-        # Convert to CPU tensors
         shr_t = torch.from_numpy(shr).unsqueeze(0).unsqueeze(0).float()
         dil_t = torch.from_numpy(dil).unsqueeze(0).unsqueeze(0).float()
         return shr_t, dil_t
@@ -106,42 +109,40 @@ class COCOTextDataset(Dataset):
         img_id = self.ids[idx]
         info = self.images[img_id]
 
-        # Load image and static resize on CPU
-        image = Image.open(self.img_map[img_id] / info["file_name"]).convert("RGB")
-        image, scale, orig_w, orig_h = self._resize_if_needed(image)
-        H, W = orig_h, orig_w
+        # 1) Load & resize
+        img = Image.open(self.img_map[img_id] / info["file_name"]).convert("RGB")
+        img, scale, W, H = self._resize_if_needed(img)
 
-        # Build masks on CPU
+        # 2) Masks
         shr_t, dil_t = self._build_masks(img_id, scale, H, W)
 
-        # Distance transform via OpenCV on CPU
-        shr_np = shr_t.squeeze(0).squeeze(0).numpy().astype(np.uint8)
-        dil_np = dil_t.squeeze(0).squeeze(0).numpy().astype(np.uint8)
-        d1_np = cv2.distanceTransform(shr_np, cv2.DIST_L2, 5)
-        d2_np = cv2.distanceTransform(dil_np, cv2.DIST_L2, 5)
-        d1_t = torch.from_numpy(d1_np).unsqueeze(0).unsqueeze(0).float()
-        d2_t = torch.from_numpy(d2_np).unsqueeze(0).unsqueeze(0).float()
+        # 3) Distance transform (CPU)
+        shr_np = shr_t[0, 0].numpy().astype(np.uint8)
+        dil_np = dil_t[0, 0].numpy().astype(np.uint8)
+        d1 = cv2.distanceTransform(shr_np, cv2.DIST_L2, 5)
+        d2 = cv2.distanceTransform(dil_np, cv2.DIST_L2, 5)
+        d1_t = torch.from_numpy(d1).unsqueeze(0).unsqueeze(0).float()
+        d2_t = torch.from_numpy(d2).unsqueeze(0).unsqueeze(0).float()
 
-        # Compute targets on CPU
+        # 4) Targets
         score_t = shr_t
         thresh_t = d1_t / (d1_t + d2_t + 1e-6) * dil_t
-        bnd_t = (
-            F.max_pool2d(score_t, kernel_size=3, stride=1, padding=1) - score_t
-        ).clamp(min=0)
+        bnd_t = (F.max_pool2d(score_t, 3, 1, 1) - score_t).clamp(min=0)
 
-        # Combine and augment on CPU
-        img_t = TF.to_tensor(image).unsqueeze(0)
+        # 5) Combine & (optional) augment
+        img_t = TF.to_tensor(img).unsqueeze(0)  # [1,3,H,W]
         combined = torch.cat([img_t, score_t, thresh_t, bnd_t], dim=1)
-        aug = self.augment(combined)
-        img_t, score_t, thresh_t, bnd_t = (
-            aug[:, :3],
-            aug[:, 3:4],
-            aug[:, 4:5],
-            aug[:, 5:6],
-        )
-        img_t = self.color_augment(img_t)
+        if self.augment is not None:
+            combined = self.augment(combined)
+            img_t = combined[:, :3]
+            score_t = combined[:, 3:4]
+            thresh_t = combined[:, 4:5]
+            bnd_t = combined[:, 5:6]
+            img_t = self.color_augment(img_t)
+        else:
+            img_t = combined[:, :3]
 
-        # Final normalize on CPU
+        # 6) Normalize image
         img_out = self.normalize(TF.to_pil_image(img_t.squeeze(0)))
 
         return img_out, score_t.squeeze(0), thresh_t.squeeze(0), bnd_t.squeeze(0)

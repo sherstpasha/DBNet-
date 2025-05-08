@@ -53,16 +53,15 @@ def match_detections(preds, gts, iou_thresh=0.5):
 
 def sliding_window_inference(
     image: Image.Image,
-    model: nn.Module,
+    model: torch.nn.Module,
     device: torch.device,
     window_size: int = 768,
     stride: int = 384,
-    db_k: float = 50.0,
 ):
     """
-    Тилед-инференс с усреднением по окнам.
+    Тилед-инференс с учётом адаптивной карты k_map.
     Возвращает четыре карты float32 размера H×W:
-     - prob_map: финальная вероятность (DBNet)
+     - prob_map: финальная вероятность (DBNet++)
      - score_map: усреднённые score-логиты
      - thresh_map: усреднённые thresh-логиты
      - bnd_map: усреднённые boundary-логиты
@@ -71,7 +70,6 @@ def sliding_window_inference(
     win_w = min(window_size, w)
     win_h = min(window_size, h)
 
-    # координаты левых верхних углов окон
     xs = (
         [0]
         if w <= win_w
@@ -104,11 +102,13 @@ def sliding_window_inference(
             for left in xs:
                 crop = image.crop((left, top, left + win_w, top + win_h))
                 inp = normalize(crop).unsqueeze(0).to(device)
-                out = model(inp)["out"]  # [1, 3, Wh, Ww]
-                sc = out[:, 0:1]  # score-логиты
-                th = out[:, 1:2]  # thresh-логиты
-                bd = out[:, 2:3]  # boundary-логиты
-                pr = torch.sigmoid(db_k * (torch.sigmoid(sc) - torch.sigmoid(th)))
+
+                outputs = model(inp)
+                sc = outputs["score_logits"]  # [1,1,Wh,Ww]
+                th = outputs["thresh_logits"]  # [1,1,Wh,Ww]
+                bd = outputs["boundary_logits"]  # [1,1,Wh,Ww]
+                kl = outputs["k_map"]  # [1,1,Wh,Ww]
+                pr = torch.sigmoid(kl * (torch.sigmoid(sc) - torch.sigmoid(th)))
 
                 sc_np = sc[0, 0].cpu().numpy()
                 th_np = th[0, 0].cpu().numpy()
@@ -122,7 +122,12 @@ def sliding_window_inference(
                 count_map[top : top + win_h, left : left + win_w] += 1
 
     denom = np.maximum(count_map, 1.0)
-    return prob_full / denom, score_full / denom, thresh_full / denom, bnd_full / denom
+    return (
+        prob_full / denom,
+        score_full / denom,
+        thresh_full / denom,
+        bnd_full / denom,
+    )
 
 
 def replace_bn_gn(module: nn.Module, num_groups: int = 32) -> nn.Module:

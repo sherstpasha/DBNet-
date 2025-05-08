@@ -24,7 +24,7 @@ class AdaptiveScaleFusion(nn.Module):
         return fused
 
 
-def build_model(db_k=50.0):
+def build_model():
     # Backbone: pretrained ResNet50
     backbone = resnet50(weights=ResNet50_Weights.DEFAULT)
     return_layers = {"layer1": "p2", "layer2": "p3", "layer3": "p4", "layer4": "p5"}
@@ -48,14 +48,12 @@ def build_model(db_k=50.0):
     )
 
     class DBNetPlusPlus(nn.Module):
-        def __init__(self, extractor, fpn, asf, head, db_k):
+        def __init__(self, extractor, fpn, asf, head):
             super().__init__()
             self.extractor = extractor
             self.fpn = fpn
             self.asf = asf
             self.head = head
-            # db_k теперь не используется напрямую, но можно хранить для совместимости
-            self.db_k = db_k
 
         def forward(self, x):
             feats = self.extractor(x)
@@ -102,7 +100,7 @@ def build_model(db_k=50.0):
                 "binary_map": binary_map,
             }
 
-    model = DBNetPlusPlus(extractor, fpn, asf, head, db_k)
+    model = DBNetPlusPlus(extractor, fpn, asf, head)
     # Replace BatchNorm with GroupNorm for small batch stability
     model = replace_bn_gn(model)
     return model

@@ -7,4 +7,4 @@ python validate.py --model_ckpt "checkpoints\best_model.pth" --test_dirs "C:\sha
 tensorboard --logdir runs
 
 
-python train.py --train_dirs "C:\data0205\Archives020525\train_images" --train_anns  "C:\data0205\Archives020525\train.json" --device cuda
+python train.py --train_dirs "C:\data0205\Archives020525\train_images" --train_anns  "C:\data0205\Archives020525\train.json" --device cuda --batch_size 4
