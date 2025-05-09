@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from torch.optim.lr_scheduler import OneCycleLR
+from torch.optim.lr_scheduler import CosineAnnealingLR
 import torchvision.transforms as transforms
 from torch.cuda.amp import autocast, GradScaler
 
@@ -63,25 +63,17 @@ def train(args):
             batch_size=1,
             shuffle=False,
             num_workers=args.num_workers,
-            pin_memory=True,
+            pin_memory=False,
         )
 
     # ========== MODEL / OPT / SCHEDULER ==========
     model = build_model().to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = OneCycleLR(
-        optimizer,
-        max_lr=args.max_lr,
-        steps_per_epoch=len(tr_loader),
-        epochs=args.epochs,
-        pct_start=0.3,
-        anneal_strategy="cos",
-        div_factor=args.max_lr / args.lr,
-        final_div_factor=1e4,
-    )
+    # Заменили OneCycleLR на CosineAnnealingLR
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.eta_min)
+
     bce = nn.BCEWithLogitsLoss(reduction="none")
     l1 = nn.L1Loss(reduction="none")
-
     scaler = GradScaler()
 
     writer = SummaryWriter(log_dir=args.log_dir)
@@ -96,8 +88,6 @@ def train(args):
         # ---- TRAIN ----
         model.train()
         sum_Ls = sum_Lb = sum_Lt = sum_Lbnd = sum_loss = 0.0
-
-        # для визуализации последнего батча
         last_imgs = last_score_gt = last_thresh_gt = last_bnd_gt = None
         last_pl = last_tl = last_bl = last_kl = None
 
@@ -108,8 +98,6 @@ def train(args):
             bnd_gt = bnd_gt.to(device, non_blocking=True)
 
             optimizer.zero_grad()
-
-            # прямой проход с AMP
             with autocast():
                 out = model(img)
                 pl, tl, bl, kl, bp = (
@@ -128,15 +116,11 @@ def train(args):
                 Lbnd = bce(bl, bnd_gt).mean()
                 loss = Ls + args.alpha * Lb + args.beta * Lt + args.gamma * Lbnd
 
-            # backward + optimizer.step() + scaler.update()
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
 
-            # وبعد أن optimizer.step() выполнен – двигаем LR scheduler
-            scheduler.step()
-
-            # логгируем
+            # Логгируем все метрики по батчу
             writer.add_scalar("Loss/train_total", loss.item(), global_step)
             writer.add_scalar("Loss/train_score", Ls.item(), global_step)
             writer.add_scalar("Loss/train_binary", Lb.item(), global_step)
@@ -153,7 +137,7 @@ def train(args):
             sum_loss += loss.item()
             global_step += 1
 
-            # сохраняем последний батч на CPU, предварительно приведя FP16→FP32
+            # Сохраняем последний батч для визуализации (FP16→FP32)
             last_imgs = img.cpu()
             last_score_gt = score_gt[0, 0].cpu()
             last_thresh_gt = thresh_gt[0, 0].cpu()
@@ -163,7 +147,7 @@ def train(args):
             last_bl = bl[0].float().cpu()
             last_kl = kl[0].float().cpu()
 
-        # средние лоссы по эпохе
+        # Эпоховые усреднённые метрики
         nb = len(tr_loader)
         writer.add_scalar("Loss/train_total_epoch", sum_loss / nb, ep)
         writer.add_scalar("Loss/train_score_epoch", sum_Ls / nb, ep)
@@ -171,7 +155,7 @@ def train(args):
         writer.add_scalar("Loss/train_thresh_epoch", sum_Lt / nb, ep)
         writer.add_scalar("Loss/train_boundary_epoch", sum_Lbnd / nb, ep)
 
-        # визуализация последнего train-кропа
+        # Визуализация последнего кропа
         model.eval()
         with torch.no_grad():
             pr = torch.sigmoid(
@@ -198,7 +182,6 @@ def train(args):
                     thresh_v = thresh_v.to(device, non_blocking=True)
                     bnd_v = bnd_v.to(device, non_blocking=True)
 
-                    # inference с AMP
                     with autocast():
                         out_v = model(img_v)
                         pl_v, tl_v, bl_v, kl_v, bp_v = (
@@ -247,7 +230,6 @@ def train(args):
                     f"[Epoch {ep}] New best val loss: {avg_val_loss:.4f}, model saved."
                 )
 
-            # sliding-window inference на весь кадр
             prob_full, sc_full, th_full, bd_full = sliding_window_inference(
                 val_img_raw,
                 model,
@@ -259,6 +241,9 @@ def train(args):
             writer.add_image(
                 "Val/Pred_prob_full", torch.from_numpy(prob_full).unsqueeze(0), ep
             )
+
+        # Шаг планировщика — один раз в конце эпохи
+        scheduler.step()
 
         model.train()
 
@@ -275,15 +260,20 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--max_lr", type=float, default=1e-3)
-    parser.add_argument("--base_size", type=int, default=1024)
-    parser.add_argument("--crop_size", type=int, default=512)
+    parser.add_argument(
+        "--eta_min",
+        type=float,
+        default=1e-6,
+        help="Минимальный LR для CosineAnnealingLR",
+    )
+    parser.add_argument("--base_size", type=int, default=2048)
+    parser.add_argument("--crop_size", type=int, default=768)
     parser.add_argument("--shrink_ratio", type=float, default=0.3)
     parser.add_argument("--p_flip", type=float, default=0.1)
     parser.add_argument("--p_rotate", type=float, default=0.1)
     parser.add_argument("--p_color", type=float, default=0.1)
     parser.add_argument("--max_angle", type=float, default=7.0)
-    parser.add_argument("--window_size", type=int, default=512)
+    parser.add_argument("--window_size", type=int, default=768)
     parser.add_argument("--stride", type=int, default=384)
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--beta", type=float, default=5.0)
