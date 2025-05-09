@@ -18,18 +18,27 @@ def compute_iou(box1, box2):
     return inter / (A1 + A2 - inter + 1e-6)
 
 
-def preds_to_boxes(prob_map, thresh=0.5, min_area=10):
-    """Из probability map в список bbox [x1,y1,x2,y2]."""
-    mask = (prob_map > thresh).astype(np.uint8)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    cnts, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    boxes = []
+def preds_to_polygons(prob_map, thresh_map, min_area=10, shrink_ratio=0.4):
+    """
+    Получение контуров произвольной формы через адаптивный порог.
+    thresh_map: карта пороговых значений того же размера.
+    """
+    # бинаризация по адаптивному thresh_map
+    mask = (prob_map > thresh_map).astype(np.uint8)
+    cnts, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+    polys = []
     for c in cnts:
-        x, y, w, h = cv2.boundingRect(c)
-        if w * h >= min_area:
-            boxes.append([x, y, x + w, y + h])
-    return boxes
+        area = cv2.contourArea(c)
+        perimeter = cv2.arcLength(c, True)
+        if area < min_area or perimeter == 0:
+            continue
+        # вычисляем смещение для approxPolyDP
+        D_prime = area * shrink_ratio / perimeter
+        # аппроксимация многоугольника
+        c_shrunk = cv2.approxPolyDP(c, epsilon=D_prime, closed=True)
+        poly = c_shrunk.squeeze().tolist()
+        polys.append(poly)
+    return polys
 
 
 def match_detections(preds, gts, iou_thresh=0.5):

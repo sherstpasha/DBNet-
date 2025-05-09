@@ -5,28 +5,90 @@ from torchvision.models import resnet50, ResNet50_Weights
 from torchvision.models.feature_extraction import create_feature_extractor
 from torchvision.ops import FeaturePyramidNetwork
 from utils import replace_bn_gn
+from torchvision.ops import DeformConv2d
 
 
 class AdaptiveScaleFusion(nn.Module):
     def __init__(self, in_channels, num_scales):
         super().__init__()
+        # Stage-wise attention
         self.weight_conv = nn.Conv2d(
             in_channels * num_scales, num_scales, kernel_size=1
         )
         self.softmax = nn.Softmax(dim=1)
+        # Spatial attention
+        self.sa_conv1 = nn.Conv2d(in_channels * num_scales, in_channels, kernel_size=1)
+        self.relu = nn.ReLU(inplace=True)
+        self.sa_conv2 = nn.Conv2d(in_channels, 1, kernel_size=1)
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, feats):
-        # feats: list of [B, C, H, W]
+        # объединяем по каналам
         stacked = torch.cat(feats, dim=1)  # [B, C*num_scales, H, W]
-        attn = self.weight_conv(stacked)  # [B, num_scales, H, W]
-        attn = self.softmax(attn)  # normalize weights across scales
+        # Spatial Attention Mask
+        mask = self.sigmoid(
+            self.sa_conv2(self.relu(self.sa_conv1(stacked)))
+        )  # [B,1,H,W]
+        # применяем маску к каждому масштабу
+        feats = [feat * mask for feat in feats]
+        # Stage-wise attention на скорректированных признаках
+        stacked = torch.cat(feats, dim=1)
+        attn = self.weight_conv(stacked)
+        attn = self.softmax(attn)  # [B,num_scales,H,W]
         fused = sum(attn[:, i : i + 1] * feats[i] for i in range(len(feats)))
         return fused
+
+
+class DeformableConvBlock(nn.Module):
+    """
+    Обёртка для Conv2d → DeformConv2d с генерацией смещений.
+    """
+
+    def __init__(self, conv):
+        super().__init__()
+        kernel_h, kernel_w = conv.kernel_size
+        stride_h, stride_w = conv.stride
+        # Генератор смещений: 2 канала на каждую точку ядра (dx, dy)
+        self.offset_conv = nn.Conv2d(
+            conv.in_channels,
+            2 * kernel_h * kernel_w,
+            kernel_size=(kernel_h, kernel_w),
+            stride=(stride_h, stride_w),
+            padding=conv.padding,
+            bias=True,
+        )
+        # Deformable Convolution
+        self.dcn = DeformConv2d(
+            conv.in_channels,
+            conv.out_channels,
+            kernel_size=(kernel_h, kernel_w),
+            stride=(stride_h, stride_w),
+            padding=conv.padding,
+            bias=(conv.bias is not None),
+        )
+
+    def forward(self, x):
+        # предсказываем смещения с учётом stride
+        offset = self.offset_conv(x)
+        # deformable conv принимает input и offset
+        return self.dcn(x, offset)
+
+
+def convert_to_dcn(module):
+    for name, child in module.named_children():
+        if isinstance(child, nn.Conv2d) and child.kernel_size == (3, 3):
+            # заменяем обычный Conv2d на deformable-блок
+            setattr(module, name, DeformableConvBlock(child))
+        else:
+            convert_to_dcn(child)
 
 
 def build_model():
     # Backbone: pretrained ResNet50
     backbone = resnet50(weights=ResNet50_Weights.DEFAULT)
+    convert_to_dcn(backbone.layer2)
+    convert_to_dcn(backbone.layer3)
+    convert_to_dcn(backbone.layer4)
     return_layers = {"layer1": "p2", "layer2": "p3", "layer3": "p4", "layer4": "p5"}
     extractor = create_feature_extractor(backbone, return_layers)
 
