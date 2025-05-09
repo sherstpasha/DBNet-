@@ -164,26 +164,33 @@ def train(args):
         writer.add_scalar("Loss/train_thresh_epoch", sum_Lt / nb, ep)
         writer.add_scalar("Loss/train_boundary_epoch", sum_Lbnd / nb, ep)
 
-        # визуализация последнего train-кропа
         model.eval()
         with torch.no_grad():
             pr = torch.sigmoid(
                 last_kl * (torch.sigmoid(last_pl) - torch.sigmoid(last_tl))
             )
-            gt_rgb = torch.stack([last_score_gt, last_thresh_gt, last_bnd_gt], dim=0)
+            # вместо stack — три отдельных изображения
             writer.add_image("Train/Input_last", last_imgs[0], ep)
-            writer.add_image("Train/ScoreLogits_last", last_pl, ep)
-            writer.add_image("Train/ThreshLogits_last", last_tl, ep)
-            writer.add_image("Train/BoundaryLogits_last", last_bl, ep)
+            writer.add_image("Train/ScoreProb_last", torch.sigmoid(last_pl), ep)
+            writer.add_image("Train/ThreshProb_last", torch.sigmoid(last_tl), ep)
+            writer.add_image("Train/BoundaryProb_last", torch.sigmoid(last_bl), ep)
             writer.add_image("Train/k_map_last", last_kl, ep)
             writer.add_image("Train/Pred_last", pr, ep)
-            writer.add_image("Train/GT_last", gt_rgb, ep)
+            # вот тут меняем:
+            writer.add_image("Train/GT_score_last", last_score_gt.unsqueeze(0), ep)
+            writer.add_image("Train/GT_thresh_last", last_thresh_gt.unsqueeze(0), ep)
+            writer.add_image("Train/GT_bnd_last", last_bnd_gt.unsqueeze(0), ep)
 
         # ---- VALIDATION ----
         if val_loader is not None:
             sum_vLs = sum_vLb = sum_vLt = sum_vLbnd = sum_vloss = 0.0
-            val_img_raw = None
 
+            # placeholders для последнего батча валидации
+            last_val_img = None
+            last_val_score_gt = last_val_thresh_gt = last_val_bnd_gt = None
+            last_val_pl = last_val_tl = last_val_bl = last_val_kl = None
+
+            model.eval()
             with torch.no_grad():
                 for i, (img_v, score_v, thresh_v, bnd_v) in enumerate(val_loader):
                     img_v = img_v.to(device, non_blocking=True)
@@ -200,6 +207,7 @@ def train(args):
                         out_v["binary_map"],
                     )
 
+                    # считаем лоссы
                     vLs = hard_negative_mining(bce(pl_v, score_v), score_v)
                     vLb = bce(bp_v, score_v).mean()
                     vLt = (l1(torch.sigmoid(tl_v), thresh_v) * (thresh_v > 0)).sum() / (
@@ -216,45 +224,48 @@ def train(args):
                     sum_vLbnd += vLbnd.item()
                     sum_vloss += vloss.item()
 
+                    # сохраняем только первый (или последний) батч для визуализации
                     if i == 0:
-                        # сохраним исходное полное изображение
-                        val_img_raw = transforms.ToPILImage()(
-                            inv_normalize(img_v[0].cpu())
-                        )
+                        last_val_img = img_v.cpu()
+                        last_val_score_gt = score_v[0, 0].cpu()
+                        last_val_thresh_gt = thresh_v[0, 0].cpu()
+                        last_val_bnd_gt = bnd_v[0, 0].cpu()
+                        last_val_pl = pl_v[0].cpu()
+                        last_val_tl = tl_v[0].cpu()
+                        last_val_bl = bl_v[0].cpu()
+                        last_val_kl = kl_v[0].cpu()
 
-            # метрики валидации
+            # усреднённые метрики по эпохе
             nvb = len(val_loader)
-            avg_val_loss = sum_vloss / nvb
-            writer.add_scalar("Loss/val_total_epoch", avg_val_loss, ep)
+            writer.add_scalar("Loss/val_total_epoch", sum_vloss / nvb, ep)
             writer.add_scalar("Loss/val_score_epoch", sum_vLs / nvb, ep)
             writer.add_scalar("Loss/val_binary_epoch", sum_vLb / nvb, ep)
             writer.add_scalar("Loss/val_thresh_epoch", sum_vLt / nvb, ep)
             writer.add_scalar("Loss/val_boundary_epoch", sum_vLbnd / nvb, ep)
 
-            # если улучшилось — сохраняем чекпоинт
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                torch.save(
-                    model.state_dict(), os.path.join(args.ckpt_dir, "best_model.pth")
+            # визуализация последнего валидационного батча
+            with torch.no_grad():
+                pr_val = torch.sigmoid(
+                    last_val_kl
+                    * (torch.sigmoid(last_val_pl) - torch.sigmoid(last_val_tl))
                 )
-                print(
-                    f"[Epoch {ep}] New best val loss: {avg_val_loss:.4f}, model saved."
+                writer.add_image("Val/Input_last", last_val_img[0], ep)
+                writer.add_image("Val/ScoreProb_last", torch.sigmoid(last_val_pl), ep)
+                writer.add_image("Val/ThreshProb_last", torch.sigmoid(last_val_tl), ep)
+                writer.add_image(
+                    "Val/BoundaryProb_last", torch.sigmoid(last_val_bl), ep
                 )
+                writer.add_image("Val/k_map_last", last_val_kl, ep)
+                writer.add_image("Val/Pred_last", pr_val, ep)
+                writer.add_image(
+                    "Val/GT_score_last", last_val_score_gt.unsqueeze(0), ep
+                )
+                writer.add_image(
+                    "Val/GT_thresh_last", last_val_thresh_gt.unsqueeze(0), ep
+                )
+                writer.add_image("Val/GT_bnd_last", last_val_bnd_gt.unsqueeze(0), ep)
 
-            # sliding-window inference на весь кадр + визуализация
-            prob_full, sc_full, th_full, bd_full = sliding_window_inference(
-                val_img_raw,
-                model,
-                device,
-                window_size=args.window_size,
-                stride=args.stride,
-            )
-            writer.add_image("Val/Input_full", transforms.ToTensor()(val_img_raw), ep)
-            writer.add_image(
-                "Val/Pred_prob_full", torch.from_numpy(prob_full).unsqueeze(0), ep
-            )
-
-        model.train()
+            model.train()
 
     writer.close()
 

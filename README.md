@@ -13,3 +13,5 @@ python train.py --train_dirs "C:\data0205\Archives020525\train_images" --train_a
 python infer.py --image_path "C:\data0205\Archives020525\test_images\12344.jpg" --ckpt_path "C:\Users\pasha\OneDrive\Рабочий стол\best_model.pth" --window_size 768 --stride 378
 
 python inferpse.py --image_path "C:\data0205\School\test_images\14_2.jpg" --ckpt_path "C:\Users\pasha\OneDrive\Рабочий стол\best_model.pth" --window_size 768 --stride 512 --high_th 0.8 --low_th 0.5
+
+python show.py --image_path "C:\data0205\School\test_images\14_2.jpg" --ckpt_path "C:\Users\pasha\OneDrive\Рабочий стол\best_model.pth" --window_size 768 --stride 512
